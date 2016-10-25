@@ -1,5 +1,13 @@
 <?php
 define('AYDF_DIR', dirname(__FILE__) . DIRECTORY_SEPARATOR);
+
+function aydf_getname($type, $funcname) {
+	return array(
+		'filename' => $type . '.' . $funcname . '.php',
+		'funcname' => 'aydf_' . $type . '_' . $funcname
+	);
+}
+
 class AyDataFactory extends ArrayObject {
 	static private $pluginDir = array();
 	static private $loadedPlugin = array();
@@ -48,12 +56,7 @@ class AyDataFactory extends ArrayObject {
 	 * @return AyDataFactory
 	 */
 	public function __call($name, $args) {
-		if (self::PluginExists('factory', $name)) {
-			return self::LoadPlugin('factory', $name, $args, $this);
-		}
-
-		// If no plugin was found, return as chain.
-		return $this;
+		return self::LoadPlugin('factory', $name, $args, $this);
 	}
 
 	/**
@@ -149,41 +152,36 @@ class AyDataFactory extends ArrayObject {
 	 * @param string $funcname
 	 * @return bool
 	 */
-	static public function PluginExists($type, $funcname) {
+	static private function GetPluginFunction($type, $funcname) {
 		if (empty(self::$pluginDir)) {
 			self::$pluginDir[AYDF_DIR . 'aydf_plugins' . DIRECTORY_SEPARATOR] = true;
 		}
 
-		$pluginFileName = $type . '.' . $funcname . '.php';
-		$functionName = 'aydf_' . $type . '_' . $funcname;
+		$datatypeName = aydf_getname($type, $funcname);
+		$anyName = aydf_getname('any', $funcname);
 
-		if (isset(self::$bindedPlugin[$functionName])) {
-			return true;
-		} elseif (!isset(self::$loadedPlugin[$functionName])) {
-			foreach (self::$pluginDir as $pluginDir => $var) {
-				// If the plugin file exists
-				if (file_exists($pluginDir . $pluginFileName)) {
-					include $pluginDir . $pluginFileName;
-					// If the plugin function still not be found after the plugin file was loaded
-					// Mark the plugin function as failed.
-					if (!function_exists($functionName)) {
-						self::$loadedPlugin[$functionName] = false;
-						return false;
-					} else {
-						self::$loadedPlugin[$functionName] = true;
-						return true;
+		if (function_exists($datatypeName['funcname']) || (isset(self::$loadedPlugin[$datatypeName['funcname']]) && self::$loadedPlugin[$datatypeName['funcname']])) {
+			return $datatypeName['funcname'];
+		} elseif (function_exists($anyName['funcname']) || (isset(self::$loadedPlugin[$anyName['funcname']]) && self::$loadedPlugin[$anyName['funcname']])) {
+			return $anyName['funcname'];
+		}
+
+		foreach (self::$pluginDir as $pluginDir => $var) {
+			// If the plugin file exists
+			foreach (array($datatypeName, $anyName) as $name) {
+				if (file_exists($pluginDir . $name['filename'])) {
+					include $pluginDir . $name['filename'];
+
+					if (function_exists($name['funcname'])) {
+						self::$loadedPlugin[$name['funcname']] = true;
+						return $name['funcname'];
 					}
 				}
 			}
-
-			// Until all plugin folder has searched, it the plugin function still not be marked
-			// Mark the plugin function as failed.
-			if (!isset(self::$loadedPlugin[$functionName])) {
-				self::$loadedPlugin[$functionName] = false;
-				return false;
-			}
 		}
-		return true;
+
+		self::$loadedPlugin[$datatypeName['funcname']] = false;
+		return '';
 	}
 
 	/**
@@ -203,45 +201,25 @@ class AyDataFactory extends ArrayObject {
 		if (empty(self::$pluginDir)) {
 			self::$pluginDir[AYDF_DIR . 'aydf_plugins' . DIRECTORY_SEPARATOR] = true;
 		}
-		$pluginFileName = $type . '.' . $funcname . '.php';
-		$functionName = 'aydf_' . $type . '_' . $funcname;
 
-		// If plugin function not marked as loaded
-		if (isset(self::$bindedPlugin[$functionName])) {
-			$functionName = new ReflectionFunction(self::$bindedPlugin[$functionName]);
-		} elseif (!isset(self::$loadedPlugin[$functionName])) {
-			foreach (self::$pluginDir as $pluginDir => $var) {
-				// If the plugin file exists
-				if (file_exists($pluginDir . $pluginFileName)) {
-					include $pluginDir . $pluginFileName;
-					// If the plugin function still not be found after the plugin file was loaded
-					// Mark the plugin function as failed.
-					if (!function_exists($functionName)) {
-						self::$loadedPlugin[$functionName] = false;
-						return '';
-					} else {
-						self::$loadedPlugin[$functionName] = true;
-						break;
-					}
-				}
-			}
+		$datatypeName = aydf_getname($type, $funcname);
+		$anyName = aydf_getname('any', $funcname);
 
-			// Until all plugin folder has searched, it the plugin function still not be marked
-			// Mark the plugin function as failed.
-			if (!isset(self::$loadedPlugin[$functionName])) {
-				self::$loadedPlugin[$functionName] = false;
+		if (isset(self::$bindedPlugin[$datatypeName['funcname']])) {
+			// DataType binded function
+			$closureFunction = self::$bindedPlugin[$datatypeName['funcname']];
+		} elseif (isset(self::$bindedPlugin[$anyName['funcname']])) {
+			// 'Any' datatype binded function
+			$closureFunction = self::$bindedPlugin[$anyName['funcname']];
+		} else {
+			if (!$closureFunction = self::GetPluginFunction($type, $funcname)) {
 				return '';
 			}
-		} elseif (!self::$loadedPlugin[$functionName]) {
-			// If the plugin function has marked as failed, ignore it.
-			return '';
 		}
 
-		if (is_string($functionName)) {
-			$functionName = new ReflectionFunction($functionName);
-		}
-		$functionName = $functionName->getClosure();
-		return call_user_func_array($data->reflection($functionName), $parameters);
+		// Reflect the function and get a new closure function, re-bind as AyDataFactoryProcessor
+		$closureFunction = new ReflectionFunction($closureFunction);
+		return call_user_func_array($data->reflection($closureFunction->getClosure()), $parameters);
 	}
 }
 
@@ -304,14 +282,7 @@ class AyDataFactoryProcessor {
 
 		// If data type plugin exists, execute it, else try to find the 'any' data
 		// type plugin.
-		if (AyDataFactory::PluginExists($type, $name)) {
-			return AyDataFactory::LoadPlugin($type, $name, $args, $this);
-		} elseif (AyDataFactory::PluginExists('any', $name)) {
-			return AyDataFactory::LoadPlugin('any', $name, $args, $this);
-		}
-
-		// If no plugin was found, return as chain.
-		return $this;
+		return AyDataFactory::LoadPlugin($type, $name, $args, $this);
 	}
 
 	/**
